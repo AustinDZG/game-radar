@@ -6,12 +6,12 @@
 import json
 import re
 import sys
+import threading
 import time
-import hashlib
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from urllib.parse import urlparse
 
 try:
     import requests
@@ -23,7 +23,19 @@ except ImportError:
 
 # ── Config ──
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-TIMEOUT = 20
+TIMEOUT = 15
+MAX_WORKERS = 12
+_print_lock = threading.Lock()
+_session_local = threading.local()
+
+
+def get_session():
+    """每个线程复用独立 Session，启用连接池"""
+    if not hasattr(_session_local, "session"):
+        session = requests.Session()
+        session.headers.update({"User-Agent": UA})
+        _session_local.session = session
+    return _session_local.session
 BEIJING = timezone(timedelta(hours=8))
 NOW = datetime.now(BEIJING)
 TODAY = NOW.strftime("%Y-%m-%d")
@@ -40,42 +52,119 @@ CATS = {
 
 # ── 18 个信息源 ──
 SOURCES = [
-    # ===== 美国 =====
-    {"name": "GamesBeat", "url": "https://gamesbeat.com/", "rss": "https://venturebeat.com/category/games/feed/", "country": "US", "scrape": False},
-    {"name": "Game Informer", "url": "https://gameinformer.com/", "rss": "https://www.gameinformer.com/rss.xml", "country": "US", "scrape": False},
-    {"name": "Game Rant", "url": "https://gamerant.com/", "rss": "https://gamerant.com/feed/", "country": "US", "scrape": False},
+    {"name": "GamesBeat", "url": "https://gamesbeat.com/", "rss": "https://venturebeat.com/category/games/feed/", "country": "US"},
+    {"name": "Game Informer", "url": "https://gameinformer.com/", "rss": "https://www.gameinformer.com/rss.xml", "country": "US"},
+    {"name": "Game Rant", "url": "https://gamerant.com/", "rss": "https://gamerant.com/feed/", "country": "US"},
     {"name": "Gameranx", "url": "https://gameranx.com/", "rss": None, "country": "US", "scrape": True, "scrape_url": "https://gameranx.com/"},
-    {"name": "Giant Bomb", "url": "https://giantbomb.com/", "rss": "https://www.giantbomb.com/feeds/news/", "country": "US", "scrape": False},
-    {"name": "IGN", "url": "https://www.ign.com/", "rss": "https://feeds.feedburner.com/ign/all", "country": "US", "scrape": False},
-    {"name": "GameSpot", "url": "https://www.gamespot.com/", "rss": "https://www.gamespot.com/feeds/news/", "country": "US", "scrape": False},
-    {"name": "Kotaku", "url": "https://kotaku.com/", "rss": "https://kotaku.com/rss", "country": "US", "scrape": False},
-    {"name": "PC Gamer", "url": "https://www.pcgamer.com/", "rss": "https://www.pcgamer.com/rss/", "country": "US", "scrape": False},
-    {"name": "Polygon", "url": "https://www.polygon.com/", "rss": "https://www.polygon.com/rss/index.xml", "country": "US", "scrape": False},
-    {"name": "GamesIndustry", "url": "https://www.gamesindustry.biz/", "rss": "https://www.gamesindustry.biz/feed", "country": "US", "scrape": False},
-    {"name": "Mobilegamer", "url": "https://mobilegamer.biz/", "rss": "https://mobilegamer.biz/feed/", "country": "US", "scrape": False},
-    {"name": "PocketGamer.biz", "url": "https://www.pocketgamer.biz/", "rss": "https://www.pocketgamer.biz/rss.php", "country": "US", "scrape": False},
-    {"name": "Dexerto", "url": "https://www.dexerto.com/", "rss": "https://www.dexerto.com/feed/", "country": "US", "scrape": False},
-    {"name": "PocketGamer", "url": "https://www.pocketgamer.com/", "rss": "https://www.pocketgamer.com/feed/", "country": "US", "scrape": False},
-    # ===== 中国 =====
+    {"name": "Giant Bomb", "url": "https://giantbomb.com/", "rss": "https://www.giantbomb.com/feeds/news/", "country": "US"},
+    {"name": "IGN", "url": "https://www.ign.com/", "rss": "https://feeds.feedburner.com/ign/all", "country": "US"},
+    {"name": "GameSpot", "url": "https://www.gamespot.com/", "rss": "https://www.gamespot.com/feeds/news/", "country": "US"},
+    {"name": "Kotaku", "url": "https://kotaku.com/", "rss": "https://kotaku.com/rss", "country": "US"},
+    {"name": "PC Gamer", "url": "https://www.pcgamer.com/", "rss": "https://www.pcgamer.com/rss/", "country": "US"},
+    {"name": "Polygon", "url": "https://www.polygon.com/", "rss": "https://www.polygon.com/rss/index.xml", "country": "US"},
+    {"name": "GamesIndustry", "url": "https://www.gamesindustry.biz/", "rss": "https://www.gamesindustry.biz/feed", "country": "US"},
+    {"name": "Mobilegamer", "url": "https://mobilegamer.biz/", "rss": "https://mobilegamer.biz/feed/", "country": "US"},
+    {"name": "PocketGamer.biz", "url": "https://www.pocketgamer.biz/", "rss": "https://www.pocketgamer.biz/rss.php", "country": "US"},
+    {"name": "Dexerto", "url": "https://www.dexerto.com/", "rss": "https://www.dexerto.com/feed/", "country": "US"},
+    {"name": "PocketGamer", "url": "https://www.pocketgamer.com/", "rss": "https://www.pocketgamer.com/feed/", "country": "US"},
     {"name": "游民星空", "url": "https://www.gamersky.com/", "rss": None, "country": "CN", "scrape": True, "scrape_url": "https://www.gamersky.com/news/"},
-    # ===== 日本 =====
-    {"name": "gamebiz", "url": "https://gamebiz.jp/", "rss": "https://gamebiz.jp/feed", "country": "JP", "scrape": False},
-    {"name": "GameBusiness", "url": "https://www.gamebusiness.jp/", "rss": "https://www.gamebusiness.jp/rss20/index.rdf", "country": "JP", "scrape": False},
+    {"name": "gamebiz", "url": "https://gamebiz.jp/", "rss": "https://gamebiz.jp/feed", "country": "JP"},
+    {"name": "GameBusiness", "url": "https://www.gamebusiness.jp/", "rss": "https://www.gamebusiness.jp/rss20/index.rdf", "country": "JP"},
+    {"name": "Edge", "url": "https://www.gamesradar.com/uk/edge/", "rss": "https://www.gamesradar.com/uk/edge/feed/", "country": "GB"},
+    {"name": "Eurogamer", "url": "https://www.eurogamer.net/", "rss": "https://www.eurogamer.net/feed", "country": "GB"},
+    {"name": "GamesRadar+", "url": "https://www.gamesradar.com/", "rss": "https://www.gamesradar.com/feed/", "country": "GB"},
+    {"name": "GAMINGbible", "url": "https://www.gamingbible.com/", "rss": "https://www.gamingbible.com/feed", "country": "GB"},
+    {"name": "PCGamesN", "url": "https://www.pcgamesn.com/", "rss": "https://www.pcgamesn.com/feed", "country": "GB"},
+    {"name": "Pocket Tactics", "url": "https://www.pockettactics.com/", "rss": "https://www.pockettactics.com/feed", "country": "GB"},
+    {"name": "Techradar Gaming", "url": "https://www.techradar.com/sg/gaming", "rss": "https://www.techradar.com/feeds/articletype/news/gaming", "country": "GB"},
+    {"name": "VG247", "url": "https://www.vg247.com/", "rss": "https://www.vg247.com/feed", "country": "GB"},
+    {"name": "VGC", "url": "https://www.videogameschronicle.com/", "rss": "https://www.videogameschronicle.com/feed/", "country": "GB"},
+    {"name": "Infobae Gaming", "url": "https://www.infobae.com/malditos-nerds/", "rss": None, "country": "AR", "scrape": True, "scrape_url": "https://www.infobae.com/malditos-nerds/"},
+    {"name": "Press Start", "url": "https://press-start.com.au/", "rss": "https://press-start.com.au/feed/", "country": "AU"},
+    {"name": "Stevivor", "url": "https://stevivor.com/", "rss": "https://stevivor.com/feed/", "country": "AU"},
+    {"name": "invader.be", "url": "https://invader.be/", "rss": None, "country": "BE", "scrape": True, "scrape_url": "https://invader.be/"},
+    {"name": "Combo Infinito", "url": "https://www.comboinfinito.com.br/", "rss": None, "country": "BR", "scrape": True, "scrape_url": "https://www.comboinfinito.com.br/"},
+    {"name": "Flow Games", "url": "https://flowgames.gg/", "rss": None, "country": "BR", "scrape": True, "scrape_url": "https://flowgames.gg/"},
+    {"name": "A9VG", "url": "https://www.a9vg.com/", "rss": "https://www.a9vg.com/rss/data/sample", "country": "CN"},
+    {"name": "Game Bonfire", "url": "https://gamebonfire.com/", "rss": None, "country": "CN", "scrape": True, "scrape_url": "https://gamebonfire.com/"},
+    {"name": "GameCores", "url": "https://gcores.com/", "rss": "https://www.gcores.com/rss", "country": "CN"},
+    {"name": "GamerFocus", "url": "https://www.gamerfocus.co/", "rss": "https://www.gamerfocus.co/feed/", "country": "CO"},
+    {"name": "HTL", "url": "https://www.hcl.hr/", "rss": None, "country": "HR", "scrape": True, "scrape_url": "https://www.hcl.hr/"},
+    {"name": "GAMES.CZ", "url": "https://games.tiscali.cz/", "rss": None, "country": "CZ", "scrape": True, "scrape_url": "https://games.tiscali.cz/"},
+    {"name": "Gamereactor", "url": "https://www.gamereactor.dk/", "rss": "https://www.gamereactor.dk/rss/", "country": "DK"},
+    {"name": "Pelit", "url": "https://www.pelit.fi/", "rss": None, "country": "FI", "scrape": True, "scrape_url": "https://www.pelit.fi/"},
+    {"name": "ActuGaming", "url": "https://www.actugaming.net/", "rss": "https://www.actugaming.net/feed/", "country": "FR"},
+    {"name": "GameBlog", "url": "https://www.gameblog.fr/", "rss": "https://www.gameblog.fr/rss.xml", "country": "FR"},
+    {"name": "Gamekult", "url": "https://www.gamekult.com/", "rss": "https://www.gamekult.com/feed.xml", "country": "FR"},
+    {"name": "Jeux Vidéo Magazine", "url": "https://www.jeuxvideomagazine.com/", "rss": None, "country": "FR", "scrape": True, "scrape_url": "https://www.jeuxvideomagazine.com/"},
+    {"name": "JEUXACTU", "url": "https://www.jeuxactu.com/", "rss": "https://www.jeuxactu.com/rss/", "country": "FR"},
+    {"name": "MGG", "url": "https://www.millenium.org/", "rss": None, "country": "FR", "scrape": True, "scrape_url": "https://www.millenium.org/"},
+    {"name": "EarlyGame", "url": "https://earlygame.com/", "rss": "https://earlygame.com/feed", "country": "DE"},
+    {"name": "GamePro", "url": "https://www.gamepro.de/", "rss": "https://www.gamepro.de/rss/news.rss", "country": "DE"},
+    {"name": "GameStar", "url": "https://www.gamestar.de/", "rss": "https://www.gamestar.de/news/rss/news.rss", "country": "DE"},
+    {"name": "Gameswelt", "url": "https://www.gameswelt.de/", "rss": "https://www.gameswelt.de/rss/news.xml", "country": "DE"},
+    {"name": "M! Games", "url": "https://www.maniac.de/", "rss": None, "country": "DE", "scrape": True, "scrape_url": "https://www.maniac.de/"},
+    {"name": "PC Games", "url": "https://www.pcgames.de/", "rss": "https://www.pcgames.de/rss/news.rss", "country": "DE"},
+    {"name": "GSPlus", "url": "https://www.gsplus.hu/", "rss": None, "country": "HU", "scrape": True, "scrape_url": "https://www.gsplus.hu/"},
+    {"name": "Gaming Bolt", "url": "https://gamingbolt.com/", "rss": "https://gamingbolt.com/feed", "country": "IN"},
+    {"name": "Everyeye.it", "url": "https://www.everyeye.it/", "rss": "https://www.everyeye.it/feed/", "country": "IT"},
+    {"name": "Multiplayer.it", "url": "https://multiplayer.it/", "rss": "https://multiplayer.it/feed/", "country": "IT"},
+    {"name": "SpazioGames", "url": "https://www.spaziogames.it/", "rss": "https://www.spaziogames.it/feed/", "country": "IT"},
+    {"name": "4Gamer", "url": "https://www.4gamer.net/", "rss": "https://www.4gamer.net/rss/index.xml", "country": "JP"},
+    {"name": "Dengeki", "url": "https://hobby.dengeki.com/", "rss": None, "country": "JP", "scrape": True, "scrape_url": "https://hobby.dengeki.com/"},
+    {"name": "Famitsu", "url": "https://www.famitsu.com/", "rss": "https://www.famitsu.com/feed/", "country": "JP"},
+    {"name": "GAME Watch", "url": "https://game.watch.impress.co.jp/", "rss": None, "country": "JP", "scrape": True, "scrape_url": "https://game.watch.impress.co.jp/"},
+    {"name": "Game*Spark", "url": "https://www.gamespark.jp/", "rss": "https://www.gamespark.jp/rss/index.rdf", "country": "JP"},
+    {"name": "GamerBraves", "url": "https://www.gamerbraves.com/", "rss": "https://www.gamerbraves.com/feed/", "country": "MY"},
+    {"name": "Kakuchopurei", "url": "https://www.kakuchopurei.com/", "rss": None, "country": "MY", "scrape": True, "scrape_url": "https://www.kakuchopurei.com/"},
+    {"name": "Nmia Gaming", "url": "https://nmiagaming.com/", "rss": "https://nmiagaming.com/feed/", "country": "MY"},
+    {"name": "3DJuegos LATAM", "url": "https://www.3djuegos.lat/", "rss": None, "country": "MX", "scrape": True, "scrape_url": "https://www.3djuegos.lat/"},
+    {"name": "Atomix", "url": "https://atomix.vg/", "rss": "https://atomix.vg/feed/", "country": "MX"},
+    {"name": "LevelUp", "url": "https://www.levelup.com/", "rss": "https://www.levelup.com/rss/noticias", "country": "MX"},
+    {"name": "TierraGamer", "url": "https://tierragamer.com/", "rss": "https://tierragamer.com/feed/", "country": "MX"},
+    {"name": "Saudi Gamer", "url": "https://www.saudigamer.com/", "rss": "https://www.saudigamer.com/feed/", "country": "SA"},
+    {"name": "True Gaming", "url": "https://www.true-gaming.net/", "rss": "https://www.true-gaming.net/home/feed/", "country": "SA"},
+    {"name": "Gamecored", "url": "https://gamecored.com/", "rss": None, "country": "PE", "scrape": True, "scrape_url": "https://gamecored.com/"},
+    {"name": "One More Game", "url": "https://onemoregame.ph/", "rss": "https://onemoregame.ph/feed/", "country": "PH"},
+    {"name": "Sirus Gaming", "url": "https://sirusgaming.com/", "rss": "https://sirusgaming.com/feed/", "country": "PH"},
+    {"name": "UnGEEK", "url": "https://www.ungeek.ph/", "rss": "https://www.ungeek.ph/feed/", "country": "PH"},
+    {"name": "CD-Action", "url": "https://cdaction.pl/", "rss": "https://cdaction.pl/rss/news.xml", "country": "PL"},
+    {"name": "GRYOnline", "url": "https://www.gry-online.pl/", "rss": "https://www.gry-online.pl/rss/news.xml", "country": "PL"},
+    {"name": "Geek Culture", "url": "https://geekculture.co/", "rss": "https://geekculture.co/feed/", "country": "SG"},
+    {"name": "GLITCHED Africa", "url": "https://www.glitched.online/", "rss": "https://www.glitched.online/feed/", "country": "ZA"},
+    {"name": "RULIWEB", "url": "https://m.ruliweb.com/", "rss": None, "country": "KR", "scrape": True, "scrape_url": "https://m.ruliweb.com/"},
+    {"name": "ThisisGame", "url": "https://www.thisisgame.com/", "rss": None, "country": "KR", "scrape": True, "scrape_url": "https://www.thisisgame.com/"},
+    {"name": "3DJuegos", "url": "https://www.3djuegos.com/", "rss": "https://www.3djuegos.com/rss.xml", "country": "ES"},
+    {"name": "Alfa Beta Juega", "url": "https://alfabetajuega.com/", "rss": None, "country": "ES", "scrape": True, "scrape_url": "https://alfabetajuega.com/"},
+    {"name": "Hobby Consolas", "url": "https://www.hobbyconsolas.com/", "rss": "https://www.hobbyconsolas.com/rss.xml", "country": "ES"},
+    {"name": "MeriStation", "url": "https://as.com/meristation/", "rss": "https://as.com/meristation/rss.xml", "country": "ES"},
+    {"name": "Vandal", "url": "https://vandal.elespanol.com/", "rss": "https://vandal.elespanol.com/rss.xml", "country": "ES"},
+    {"name": "FZ", "url": "https://www.fz.se/", "rss": "https://www.fz.se/feed", "country": "SE"},
+    {"name": "Games.ch", "url": "https://www.games.ch/", "rss": None, "country": "CH", "scrape": True, "scrape_url": "https://www.games.ch/"},
+    {"name": "Bahamut", "url": "https://www.gamer.com.tw/", "rss": "https://www.gamer.com.tw/rss.xml", "country": "TW"},
+    {"name": "udngame", "url": "https://game.udn.com/game/index", "rss": None, "country": "TW", "scrape": True, "scrape_url": "https://game.udn.com/game/index"},
+    {"name": "GamingDose", "url": "https://www.gamingdose.com/", "rss": None, "country": "TH", "scrape": True, "scrape_url": "https://www.gamingdose.com/"},
+    {"name": "Oyungezer", "url": "https://oyungezer.com.tr/", "rss": None, "country": "TR", "scrape": True, "scrape_url": "https://oyungezer.com.tr/"},
+    {"name": "Kokang Gaming", "url": "https://kokanggaming.com/", "rss": None, "country": "ID", "scrape": True, "scrape_url": "https://kokanggaming.com/"},
+    {"name": "Kotak Game", "url": "http://www.kotakgame.com/", "rss": None, "country": "ID", "scrape": True, "scrape_url": "http://www.kotakgame.com/"},
+    {"name": "Arkaden", "url": "https://arkaden.dk/", "rss": None, "country": "DK", "scrape": True, "scrape_url": "https://arkaden.dk/"},
+    {"name": "91 Mobiles", "url": "https://www.91mobiles.com/game-zone", "rss": None, "country": "IN", "scrape": True, "scrape_url": "https://www.91mobiles.com/game-zone"},
+    {"name": "Power Unlimited", "url": "https://pu.nl/", "rss": None, "country": "NL", "scrape": True, "scrape_url": "https://pu.nl/"},
+    {"name": "Volk", "url": "https://www.noticiascaracol.com/videojuegos", "rss": None, "country": "CO", "scrape": True, "scrape_url": "https://www.noticiascaracol.com/videojuegos"},
+    {"name": "Reporte Indigo", "url": "https://geek.reporteindigo.com/", "rss": None, "country": "MX", "scrape": True, "scrape_url": "https://geek.reporteindigo.com/"},
+    {"name": "VGA4A", "url": "https://www.vga4a.com/", "rss": None, "country": "SA", "scrape": True, "scrape_url": "https://www.vga4a.com/"},
+    {"name": "Nos Dicen Gamers", "url": "https://nosdicengamers.com/", "rss": None, "country": "PE", "scrape": True, "scrape_url": "https://nosdicengamers.com/"},
+    {"name": "Online Station", "url": "https://www.online-station.net/", "rss": None, "country": "TH", "scrape": True, "scrape_url": "https://www.online-station.net/"},
+    {"name": "This is Game Thailand", "url": "https://thisisgamethailand.com/", "rss": None, "country": "TH", "scrape": True, "scrape_url": "https://thisisgamethailand.com/"},
+    {"name": "Atarita", "url": "https://www.atarita.com/", "rss": None, "country": "TR", "scrape": True, "scrape_url": "https://www.atarita.com/"},
 ]
 
 
-def fetch_rss(source, since_hours=24):
-    """拉 RSS 并解析，返回文章列表"""
+def _parse_rss(root, source, since_hours=24):
+    """从已解析的 XML 根节点提取 RSS 文章"""
     articles = []
-    try:
-        resp = requests.get(source["rss"], headers={"User-Agent": UA}, timeout=TIMEOUT)
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-    except Exception as e:
-        print(f"  ⚠ {source['name']} RSS 失败: {e}", file=sys.stderr)
-        return articles
+    cutoff = NOW - timedelta(hours=since_hours)
 
-    # RSS 2.0
     for item in root.iter("item"):
         try:
             title = item.find("title").text or ""
@@ -103,10 +192,8 @@ def fetch_rss(source, since_hours=24):
                     except ValueError:
                         continue
 
-            if pub_dt:
-                cutoff = NOW - timedelta(hours=since_hours)
-                if pub_dt < cutoff:
-                    continue
+            if pub_dt and pub_dt < cutoff:
+                continue
 
             # 去 HTML 标签
             title = re.sub(r"<[^>]+>", "", title).strip()
@@ -122,24 +209,18 @@ def fetch_rss(source, since_hours=24):
                     "summary": desc,
                     "category": guess_category(title, desc),
                 })
-        except Exception as e:
+        except Exception:
             continue
 
     return articles
 
 
-def fetch_atom(source, since_hours=24):
-    """拉 Atom feed"""
+def _parse_atom(root, source, since_hours=24):
+    """从已解析的 XML 根节点提取 Atom 文章"""
     articles = []
-    try:
-        resp = requests.get(source["rss"], headers={"User-Agent": UA}, timeout=TIMEOUT)
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-    except Exception as e:
-        print(f"  ⚠ {source['name']} Atom 失败: {e}", file=sys.stderr)
-        return articles
-
+    cutoff = NOW - timedelta(hours=since_hours)
     ns = {"atom": "http://www.w3.org/2005/Atom"}
+
     for entry in root.iter("{http://www.w3.org/2005/Atom}entry"):
         try:
             title = entry.find("atom:title", ns)
@@ -173,10 +254,8 @@ def fetch_atom(source, since_hours=24):
                     except ValueError:
                         continue
 
-            if pub_dt:
-                cutoff = NOW - timedelta(hours=since_hours)
-                if pub_dt < cutoff:
-                    continue
+            if pub_dt and pub_dt < cutoff:
+                continue
 
             if title and link:
                 articles.append({
@@ -194,13 +273,28 @@ def fetch_atom(source, since_hours=24):
     return articles
 
 
+def fetch_feed(source, since_hours=24):
+    """单次请求拉取 RSS/Atom 并解析"""
+    try:
+        resp = get_session().get(source["rss"], timeout=TIMEOUT)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+    except Exception as e:
+        print(f"  ⚠ {source['name']} Feed 失败: {e}", file=sys.stderr)
+        return []
+
+    tag = root.tag.rsplit("}", 1)[-1].lower()
+    if tag == "feed":
+        return _parse_atom(root, source, since_hours)
+    return _parse_rss(root, source, since_hours)
+
+
 def fetch_gamersky(since_hours=24):
     """抓取游民星空新闻列表页"""
     articles = []
     try:
-        resp = requests.get(
+        resp = get_session().get(
             "https://www.gamersky.com/news/",
-            headers={"User-Agent": UA},
             timeout=TIMEOUT,
         )
         resp.raise_for_status()
@@ -259,9 +353,8 @@ def fetch_gameranx(since_hours=24):
     """抓取 Gameranx 首页"""
     articles = []
     try:
-        resp = requests.get(
+        resp = get_session().get(
             "https://gameranx.com/",
-            headers={"User-Agent": UA},
             timeout=TIMEOUT,
         )
         resp.raise_for_status()
@@ -319,20 +412,20 @@ def guess_category(title, summary):
 
 def fetch_source(source, since_hours=24):
     """抓取单个信息源"""
-    print(f"  📡 {source['name']}...", end=" ", flush=True)
-    articles = []
-
     if source.get("scrape"):
         if "gamersky" in source.get("scrape_url", ""):
             articles = fetch_gamersky(since_hours)
         elif "gameranx" in source.get("scrape_url", ""):
             articles = fetch_gameranx(since_hours)
+        else:
+            articles = []
     elif source.get("rss"):
-        articles = fetch_rss(source, since_hours)
-        if not articles:
-            articles = fetch_atom(source, since_hours)
+        articles = fetch_feed(source, since_hours)
+    else:
+        articles = []
 
-    print(f"{len(articles)} 条", flush=True)
+    with _print_lock:
+        print(f"  📡 {source['name']}... {len(articles)} 条", flush=True)
     return articles
 
 
@@ -547,11 +640,20 @@ def generate_html(articles, since_hours=24):
   <div class="sub">{TODAY} · {window_text} · 共 {total} 条</div>
 </header>
 {body}
-<footer>狼叔的游戏雷达 · 数据来自 18 个全球游戏媒体信源</footer>
+<footer>狼叔的游戏雷达 · 数据来自 全球游戏媒体信源</footer>
 </body>
 </html>"""
 
     return html
+
+
+def _format_duration(seconds):
+    """秒数 → 可读耗时"""
+    if seconds < 60:
+        return f"{seconds:.1f} 秒"
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    return f"{minutes} 分 {secs:.1f} 秒"
 
 
 def main():
@@ -562,14 +664,22 @@ def main():
         except ValueError:
             pass
 
+    scrape_start = time.perf_counter()
+
     print(f"🎮 狼叔的游戏雷达 · 抓取中（过去 {since_hours} 小时）")
     print(f"   时间: {NOW.strftime('%Y-%m-%d %H:%M')} 北京时间\n")
 
     all_articles = []
-    for src in SOURCES:
-        articles = fetch_source(src, since_hours)
-        all_articles.extend(articles)
-        time.sleep(1)  # 礼貌间隔
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(fetch_source, src, since_hours): src for src in SOURCES}
+        for future in as_completed(futures):
+            try:
+                all_articles.extend(future.result())
+            except Exception as e:
+                src = futures[future]
+                print(f"  ⚠ {src['name']} 异常: {e}", file=sys.stderr)
+
+    scrape_elapsed = time.perf_counter() - scrape_start
 
     # 去重
     unique = deduplicate(all_articles)
@@ -583,7 +693,7 @@ def main():
 <body style="background:#0d0d0f;color:#d0d0d0;font-family:sans-serif;text-align:center;padding:100px 20px;">
 <h1 style="color:#c0392b;">狼叔的游戏雷达 · {TODAY}</h1>
 <p>暂无新闻数据，请稍后再试。</p>
-<p style="color:#666;font-size:13px;">数据来自 18 个全球游戏媒体信源</p>
+<p style="color:#666;font-size:13px;">数据来自 全球游戏媒体信源</p>
 </body></html>"""
 
     else:
@@ -612,6 +722,7 @@ def main():
     print(f"📄 HTML 已保存: {out_path}")
     print(f"📁 归档: {date_path}")
     print(f"📊 JSON: {json_path}")
+    print(f"⏱️  爬取耗时: {_format_duration(scrape_elapsed)}")
     print(f"\n🎉 完成！")
 
 
