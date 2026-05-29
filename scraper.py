@@ -439,7 +439,7 @@ def generate_html(articles, since_hours=24):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>游戏雷达 · {TODAY}</title>
+<title>狼叔的游戏雷达 · {TODAY}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -543,7 +543,7 @@ def generate_html(articles, since_hours=24):
 <body>
 <header>
   <div class="label">FIREWOLF'S GAME RADAR</div>
-  <h1>游戏<span>雷达</span></h1>
+  <h1>狼叔的<span>游戏雷达</span></h1>
   <div class="sub">{TODAY} · {window_text} · 共 {total} 条</div>
 </header>
 {body}
@@ -579,9 +579,9 @@ def main():
         print("⚠ 没有抓取到任何新闻！")
         # Generate empty report
         html = f"""<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><title>游戏雷达 · {TODAY}</title></head>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>狼叔的游戏雷达 · {TODAY}</title></head>
 <body style="background:#0d0d0f;color:#d0d0d0;font-family:sans-serif;text-align:center;padding:100px 20px;">
-<h1 style="color:#c0392b;">游戏雷达 · {TODAY}</h1>
+<h1 style="color:#c0392b;">狼叔的游戏雷达 · {TODAY}</h1>
 <p>暂无新闻数据，请稍后再试。</p>
 <p style="color:#666;font-size:13px;">数据来自 18 个全球游戏媒体信源</p>
 </body></html>"""
