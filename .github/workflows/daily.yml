@@ -1,9 +1,9 @@
 name: 游戏雷达日报
 
 on:
-  schedule:
-    # 每天北京时间 08:00 和 20:00
-    - cron: "0 0,12 * * *"
+  # schedule:
+  #   # 每天北京时间 08:00 和 20:00（暂时关闭，改完再开）
+  #   - cron: "0 0,12 * * *"
   workflow_dispatch:  # 允许手动触发
 
 jobs:
