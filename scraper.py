@@ -19,7 +19,12 @@ except ImportError:
     print("Installing requests...", file=sys.stderr)
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
-    import requests
+import requests
+
+try:
+    from deep_translator import GoogleTranslator
+except ImportError:
+    GoogleTranslator = None
 
 # ── Config ──
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -441,6 +446,41 @@ def deduplicate(articles):
     return sorted(seen.values(), key=lambda x: x.get("published_at") or "", reverse=True)
 
 
+def _is_chinese(text):
+    """检测文本是否包含中文"""
+    return bool(re.search(r'[\u4e00-\u9fff]', text))
+
+
+def translate_articles(articles):
+    """将非中文标题翻译为中文（Google Translate 免费）"""
+    if GoogleTranslator is None:
+        print("  ⚠ deep-translator 未安装，跳过翻译", file=sys.stderr)
+        return articles
+
+    # 过滤需要翻译的文章
+    need_trans = [a for a in articles if not _is_chinese(a["title"])]
+    if not need_trans:
+        return articles
+
+    print(f"  🌐 翻译 {len(need_trans)} 条标题 ...", flush=True)
+    translator = GoogleTranslator(source='auto', target='zh-CN')
+
+    for i, a in enumerate(need_trans):
+        try:
+            title_en = a["title"][:500]  # 截断过长的标题
+            a["title_cn"] = translator.translate(title_en)
+            # 翻译摘要（如果存在）
+            if a.get("summary"):
+                a["summary_cn"] = translator.translate(a["summary"][:300])
+        except Exception as e:
+            a["title_cn"] = a["title"]
+        if (i + 1) % 50 == 0:
+            print(f"    翻译进度: {i + 1}/{len(need_trans)}", flush=True)
+
+    print(f"  ✅ 翻译完成", flush=True)
+    return articles
+
+
 def time_to_human(pub_str):
     """ISO 时间 → 人话"""
     if not pub_str:
@@ -485,10 +525,12 @@ def generate_html(articles, since_hours=24):
         for a in cat_items:
             time_str = time_to_human(a.get("published_at"))
             summary = a.get("summary", "")[:120]
+            subtitle = f'<p class="subtitle">{a["title"]}</p>' if a.get('title_cn') and a.get('title_cn') != a['title'] else ''
             items_html += f"""<div class="item">
   <span class="num">#{n}</span>
   <div class="item-body">
-    <a href="{a['url']}" class="title" target="_blank">{a['title']}</a>
+    <a href="{a['url']}" class="title" target="_blank">{a.get('title_cn', a['title'])}</a>
+    {subtitle}
     <span class="source">{a['source']}</span>
     <span class="time">{time_str}</span>
     {f'<p class="summary">{summary}</p>' if summary else ''}
@@ -510,10 +552,12 @@ def generate_html(articles, since_hours=24):
         items_html = ""
         for a in cat_items:
             time_str = time_to_human(a.get("published_at"))
+            subtitle = f'<p class="subtitle">{a["title"]}</p>' if a.get('title_cn') and a.get('title_cn') != a['title'] else ''
             items_html += f"""<div class="item">
   <span class="num">#{n}</span>
   <div class="item-body">
-    <a href="{a['url']}" class="title" target="_blank">{a['title']}</a>
+    <a href="{a['url']}" class="title" target="_blank">{a.get('title_cn', a['title'])}</a>
+    {subtitle}
     <span class="source">{a['source']}</span>
     <span class="time">{time_str}</span>
   </div>
@@ -621,6 +665,12 @@ def generate_html(articles, since_hours=24):
     margin-top: 4px;
     line-height: 1.6;
   }}
+  .subtitle {{
+    color: #555;
+    font-size: 12px;
+    margin-top: 1px;
+    font-style: italic;
+  }}
   footer {{
     text-align: center;
     margin-top: 40px;
@@ -684,6 +734,9 @@ def main():
     # 去重
     unique = deduplicate(all_articles)
     print(f"\n✅ 共抓取 {len(all_articles)} 条 → 去重后 {len(unique)} 条")
+
+    # 翻译
+    unique = translate_articles(unique)
 
     if not unique:
         print("⚠ 没有抓取到任何新闻！")
