@@ -735,8 +735,9 @@ def main():
     unique = deduplicate(all_articles)
     print(f"\n✅ 共抓取 {len(all_articles)} 条 → 去重后 {len(unique)} 条")
 
-    # 翻译
-    unique = translate_articles(unique)
+    # 翻译（国内被墙，默认关闭。GitHub Actions 上自动启用）
+    if '--translate' in sys.argv:
+        unique = translate_articles(unique)
 
     if not unique:
         print("⚠ 没有抓取到任何新闻！")
