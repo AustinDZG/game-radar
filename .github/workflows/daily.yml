@@ -24,7 +24,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests deep-translator
+        run: pip install requests pyyaml
 
       - name: Run scraper
         run: python scraper.py 12 --translate

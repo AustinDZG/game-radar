@@ -21,11 +21,6 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
 import requests
 
-try:
-    from deep_translator import GoogleTranslator
-except ImportError:
-    GoogleTranslator = None
-
 # ── Config ──
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 TIMEOUT = 15
@@ -452,30 +447,72 @@ def _is_chinese(text):
 
 
 def translate_articles(articles):
-    """将非中文标题翻译为中文（Google Translate 免费）"""
-    if GoogleTranslator is None:
-        print("  ⚠ deep-translator 未安装，跳过翻译", file=sys.stderr)
-        return articles
+    """将非中文标题翻译为中文（DeepSeek API）"""
+    import os
+    from urllib.request import Request, urlopen
 
     # 过滤需要翻译的文章
     need_trans = [a for a in articles if not _is_chinese(a["title"])]
     if not need_trans:
         return articles
 
-    print(f"  🌐 翻译 {len(need_trans)} 条标题 ...", flush=True)
-    translator = GoogleTranslator(source='auto', target='zh-CN')
-
-    for i, a in enumerate(need_trans):
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        # Fallback: try hermes config
         try:
-            title_en = a["title"][:500]  # 截断过长的标题
-            a["title_cn"] = translator.translate(title_en)
-            # 翻译摘要（如果存在）
-            if a.get("summary"):
-                a["summary_cn"] = translator.translate(a["summary"][:300])
+            import yaml
+            cfg = yaml.safe_load(open(os.path.expandvars(r"%LOCALAPPDATA%\\hermes\\config.yaml"), encoding="utf-8"))
+            api_key = cfg.get("model", {}).get("api_key", "")
+            base_url = cfg.get("model", {}).get("base_url", "https://api.deepseek.com/v1")
+        except:
+            print("  ⚠ 无 API Key，跳过翻译", file=sys.stderr)
+            return articles
+    else:
+        base_url = "https://api.deepseek.com/v1"
+
+    if not api_key:
+        print("  ⚠ 无 API Key，跳过翻译", file=sys.stderr)
+        return articles
+
+    print(f"  🌐 DeepSeek 翻译 {len(need_trans)} 条标题 ...", flush=True)
+
+    # Batch translate: 50 titles per API call
+    batch_size = 50
+    for batch_start in range(0, len(need_trans), batch_size):
+        batch = need_trans[batch_start:batch_start + batch_size]
+        titles = "\n".join([f"{i+1}. {a['title']}" for i, a in enumerate(batch)])
+
+        try:
+            payload = json.dumps({
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": "你是游戏新闻翻译。把以下英文标题翻译成简洁中文。只返回翻译结果，每行一个，不要序号，不要解释。"},
+                    {"role": "user", "content": titles}
+                ],
+                "temperature": 0.1,
+                "max_tokens": len(batch) * 60
+            }).encode("utf-8")
+
+            req = Request(f"{base_url}/chat/completions", data=payload, headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            })
+            resp = urlopen(req, timeout=30)
+            result = json.loads(resp.read().decode("utf-8"))
+            translated = result["choices"][0]["message"]["content"].strip().split("\n")
+
+            for i, a in enumerate(batch):
+                if i < len(translated):
+                    t = re.sub(r'^\d+[\.\、\s]+', '', translated[i]).strip()
+                    a["title_cn"] = t if t else a["title"]
+                else:
+                    a["title_cn"] = a["title"]
         except Exception as e:
-            a["title_cn"] = a["title"]
-        if (i + 1) % 50 == 0:
-            print(f"    翻译进度: {i + 1}/{len(need_trans)}", flush=True)
+            for a in batch:
+                a["title_cn"] = a["title"]
+
+        done = min(batch_start + batch_size, len(need_trans))
+        print(f"    翻译进度: {done}/{len(need_trans)}", flush=True)
 
     print(f"  ✅ 翻译完成", flush=True)
     return articles
