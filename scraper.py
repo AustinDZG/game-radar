@@ -461,11 +461,13 @@ def translate_articles(articles):
         # Fallback: try hermes config
         try:
             import yaml
-            cfg = yaml.safe_load(open(os.path.expandvars(r"%LOCALAPPDATA%\\hermes\\config.yaml"), encoding="utf-8"))
+            localappdata = os.environ.get("LOCALAPPDATA", "")
+            cfg_path = os.path.join(localappdata, "hermes", "config.yaml")
+            cfg = yaml.safe_load(open(cfg_path, encoding="utf-8"))
             api_key = cfg.get("model", {}).get("api_key", "")
             base_url = cfg.get("model", {}).get("base_url", "https://api.deepseek.com/v1")
-        except:
-            print("  ⚠ 无 API Key，跳过翻译", file=sys.stderr)
+        except Exception as e:
+            print(f"  ⚠ 读取配置失败: {e}，跳过翻译", file=sys.stderr)
             return articles
     else:
         base_url = "https://api.deepseek.com/v1"
