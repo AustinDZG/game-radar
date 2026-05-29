@@ -1,0 +1,49 @@
+name: 游戏雷达日报
+
+on:
+  schedule:
+    # 每天北京时间 08:00 和 20:00
+    - cron: "0 0,12 * * *"
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run scraper
+        run: python scraper.py 12
+
+      - name: Commit and push
+        run: |
+          git config user.name "Game Radar Bot"
+          git config user.email "bot@gameradar.local"
+          git add index.html archive/ latest.json
+          git diff --staged --quiet || git commit -m "📡 日报 $(date +%Y-%m-%d_%H%M)"
+          git push
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "."
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
